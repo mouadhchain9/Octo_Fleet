@@ -224,50 +224,64 @@ export class DbTelemetryReplay {
       return;
     }
 
-    const row     = this._rows[this._cursor];
-    const now     = performance.now();
+    const now = performance.now();
+    let rowsDispatchedThisFrame = 0;
 
-    let delayMs = 0;
+    // Process all rows that are due to be dispatched right now
+    while (this._isRunning && this._cursor < this._rows.length) {
+      const row = this._rows[this._cursor];
+      let delayMs = 0;
+      let scaledMs = 0;
+      let cappedMs = 0;
 
-    if (this._lastWallMs !== null && this._lastRowTs !== null && row.ts) {
-      // Calculate real-world ms between this row and last, then scale by speed factor
-      const dbDeltaMs  = row.ts - this._lastRowTs;
-      if (dbDeltaMs > 0) {
-        const scaledMs   = dbDeltaMs / this.speedFactor;
-        const maxMs      = this.maxGapMs / this.speedFactor;
-        const elapsed    = now - this._lastWallMs;
-        delayMs = Math.max(0, Math.min(scaledMs, maxMs) - elapsed);
+      if (this._lastWallMs !== null && this._lastRowTs !== null && row.ts !== null) {
+        const dbDeltaMs = row.ts - this._lastRowTs;
+        if (dbDeltaMs > 0) {
+          scaledMs = dbDeltaMs / this.speedFactor;
+          const maxMs = this.maxGapMs / this.speedFactor;
+          cappedMs = Math.min(scaledMs, maxMs);
+          const elapsed = now - this._lastWallMs;
+          delayMs = Math.max(0, cappedMs - elapsed);
+        }
+      }
+
+      if (delayMs <= 0) {
+        // Row is due! Dispatch it.
+        try {
+          this.publish(row.topic, row.payload);
+        } catch (e) {
+          console.warn('[DbReplay] row dispatch error:', e);
+        }
+
+        // Advance the ideal execution timeline
+        if (this._lastWallMs !== null) {
+          this._lastWallMs += cappedMs;
+        } else {
+          this._lastWallMs = now;
+        }
+        this._lastRowTs = row.ts !== null ? row.ts : this._lastRowTs;
+        
+        this._cursor++;
+        rowsDispatchedThisFrame++;
+        
+        // Prevent blocking the main thread for too long (safety valve)
+        if (rowsDispatchedThisFrame > 150) {
+           break; 
+        }
+      } else {
+        // Not due yet, break the loop and wait for the next frame
+        break;
       }
     }
 
-    if (delayMs <= 2) {
-      // Dispatch immediately this frame
-      this._dispatch(row, now);
-    } else {
-      // Use setTimeout for longer waits, then rAF for frame alignment
-      this._rafHandle = setTimeout(() => {
-        if (!this._isRunning) return;
-        this._rafHandle = requestAnimationFrame(() => {
-          if (!this._isRunning) return;
-          this._dispatch(row, performance.now());
-        });
-      }, delayMs);
+    if (this._isRunning && this._cursor < this._rows.length) {
+      // Schedule next wakeup cleanly aligned with browser paints
+      this._rafHandle = requestAnimationFrame(() => this._scheduleNext());
+    } else if (this._isRunning && this._cursor >= this._rows.length) {
+      console.log('[DbReplay] 🏁 Replay complete.');
+      this._isRunning = false;
+      if (this._onFinished) this._onFinished();
     }
-  }
-
-  _dispatch(row, wallMs) {
-    this._lastWallMs = wallMs;
-    this._lastRowTs  = row.ts;
-
-    try {
-      this.publish(row.topic, row.payload);
-    } catch (e) {
-      // Swallow individual row errors to keep replay going
-      console.warn('[DbReplay] row dispatch error:', e);
-    }
-
-    this._cursor++;
-    this._scheduleNext();
   }
 
   _parseTimestamp(tsStr) {

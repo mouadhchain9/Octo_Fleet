@@ -90,7 +90,7 @@ export class PrinterInstance {
     this.mocker = new TelemetryMocker(id, _mockPublish);
 
     // DB replay (plays back real recorded telemetry)
-    this.dbReplay = new DbTelemetryReplay(id, _mockPublish);
+    this.dbReplay = new DbTelemetryReplay(id, _mockPublish, { speedFactor: 1 });
   }
 
   /**

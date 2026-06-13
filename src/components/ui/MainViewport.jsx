@@ -61,10 +61,10 @@ export function MainViewport() {
       </div>
 
       {/* Telemetry HUD - Floating top right */}
-      {activePrinter && (
+      {activePrinterId !== null && activePrinter && (
         <div className="floating-pane telemetry-hud">
           <div className="data-row">Layer: <span>{activePrinter.layer || '0'} / {activePrinter.layers || '---'}</span></div>
-          <div className="data-row">Speed: <span>{activePrinter.feedrate ? Math.round(activePrinter.feedrate) : '0'} mm/s</span></div>
+          <div className="data-row">Speed: <span>{activePrinter.feedrate ? Math.round(activePrinter.feedrate) : '0'} mm/min</span></div>
           <div className="data-row">Z-Height: <span>{activePrinter.pos?.z?.toFixed(2) || '0.00'} mm</span></div>
           <hr />
         </div>

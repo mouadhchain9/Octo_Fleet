@@ -20,6 +20,22 @@
     box-sizing: border-box;
 }
 
+/* Global Scrollbar Styling (based on timeline) */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--accent-green);
+    border-radius: 4px;
+}
+
 body {
     margin: 0;
     padding: 0;
@@ -136,7 +152,7 @@ body {
 }
 
 .telemetry-hud {
-    top: 20px;
+    top: 30px;
     right: 20px;
     padding: 15px;
     width: 180px;
@@ -215,20 +231,7 @@ body {
     /* Subtle scanline texture */
 }
 
-/* 3. Custom Scrollbar for the Terminal */
-#terminal-output::-webkit-scrollbar {
-    width: 4px;
-}
-
-#terminal-output::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.02);
-}
-
-#terminal-output::-webkit-scrollbar-thumb {
-    background: var(--accent-green);
-    border-radius: 2px;
-    box-shadow: 0 0 5px var(--accent-green);
-}
+/* 3. Custom Scrollbar for the Terminal (removed to use global) */
 
 /* 4. Timestamp & System Tags */
 #terminal-output span {
@@ -887,7 +890,7 @@ body {
 
 .system-logo span {
     color: #fff;
-    opacity: 0.4;
+    opacity: 1;
     font-weight: 300;
     letter-spacing: 1px;
 }
@@ -1414,12 +1417,13 @@ body {
 
 .event-point-h {
     position: relative;
-    flex: 0 0 160px;
+    flex: 0 0 120px;
     /* Fixed width for each step */
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
+    height: 60px;
 }
 
 /* The Horizontal Connecting Line */
@@ -1492,20 +1496,7 @@ body {
     height: 100%;
 }
 
-/* Make scrollbar clearly visible */
-.timeline-h::-webkit-scrollbar {
-    height: 8px;
-}
-
-.timeline-h::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 4px;
-}
-
-.timeline-h::-webkit-scrollbar-thumb {
-    background: var(--accent-green);
-    border-radius: 4px;
-}
+/* Make scrollbar clearly visible (removed to use global) */
 
 /* Adjust the G-Code terminal position so it doesn't overlap the timeline */
 .gcode-terminal {

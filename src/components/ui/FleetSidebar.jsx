@@ -209,6 +209,10 @@ export function FleetSidebar() {
 
       // ── DB Replay path ──────────────────────────────────────────────────────
       if (selectedDb) {
+        if (!window.confirm("Mock replay is CPU and RAM intensive. Are you sure you want to start?")) {
+          return;
+        }
+
         if (printer.dbReplay.isRunning) {
           addLogEntry('DB REPLAY: Already running.', 'SYS');
           return;
@@ -562,100 +566,100 @@ export function FleetSidebar() {
     let currentResults = [];
 
     for (let i = 0; i < selectedModules.length; i++) {
-        const moduleKey = selectedModules[i];
-        const moduleName = getModuleReadableName(moduleKey);
+      const moduleKey = selectedModules[i];
+      const moduleName = getModuleReadableName(moduleKey);
 
-        currentResults = [...currentResults, { id: moduleKey, name: moduleName, status: 'processing' }];
-        updateCalibrationState({ results: currentResults, currentStepText: `Executing [${moduleKey.toUpperCase()}] diagnostics...` });
-        addLogEntry(`EXEC: Initializing hardware test routine [${moduleKey.toUpperCase()}]`, "SYS");
+      currentResults = [...currentResults, { id: moduleKey, name: moduleName, status: 'processing' }];
+      updateCalibrationState({ results: currentResults, currentStepText: `Executing [${moduleKey.toUpperCase()}] diagnostics...` });
+      addLogEntry(`EXEC: Initializing hardware test routine [${moduleKey.toUpperCase()}]`, "SYS");
 
-        // Generate isolated G-Code chunk for this test only
-        const chunkGcode = generateCalibrationGcode(currentPrinter, { [moduleKey]: true });
+      // Generate isolated G-Code chunk for this test only
+      const chunkGcode = generateCalibrationGcode(currentPrinter, { [moduleKey]: true });
 
-        let testSuccessResult = false;
+      let testSuccessResult = false;
 
-        if (activeJob.mode === 'stream' && activeJob.connectionConfig) {
-            // --- STREAM MODE: Upload individual file + await MQTT-driven completion ---
-            try {
-                const { OctoPrintControlService } = await import('../../services/OctoPrintControlService.js');
-                const { ip, apiKey } = activeJob.connectionConfig;
-                const fileName = `calib_${moduleKey}.gcode`;
-                const file = new File([chunkGcode], fileName, { type: 'text/plain' });
+      if (activeJob.mode === 'stream' && activeJob.connectionConfig) {
+        // --- STREAM MODE: Upload individual file + await MQTT-driven completion ---
+        try {
+          const { OctoPrintControlService } = await import('../../services/OctoPrintControlService.js');
+          const { ip, apiKey } = activeJob.connectionConfig;
+          const fileName = `calib_${moduleKey}.gcode`;
+          const file = new File([chunkGcode], fileName, { type: 'text/plain' });
 
-                addLogEntry(`UPLOAD: Sending [${fileName}] to OctoPrint at ${ip}`, "SYS");
-                const uploaded = await OctoPrintControlService.uploadFile(ip, apiKey, file);
+          addLogEntry(`UPLOAD: Sending [${fileName}] to OctoPrint at ${ip}`, "SYS");
+          const uploaded = await OctoPrintControlService.uploadFile(ip, apiKey, file);
 
-                if (!uploaded) {
-                    addLogEntry(`ERROR: Upload failed for ${fileName}.`, "SYS");
-                } else {
-                    addLogEntry(`EXEC: Starting print job [${fileName}] on physical asset...`, "SYS");
-                    await OctoPrintControlService.selectAndPrint(ip, apiKey, fileName);
+          if (!uploaded) {
+            addLogEntry(`ERROR: Upload failed for ${fileName}.`, "SYS");
+          } else {
+            addLogEntry(`EXEC: Starting print job [${fileName}] on physical asset...`, "SYS");
+            await OctoPrintControlService.selectAndPrint(ip, apiKey, fileName);
 
-                    // Grace period for OctoPrint to transition to PRINTING state via MQTT
-                    await new Promise(resolve => setTimeout(resolve, 2500));
+            // Grace period for OctoPrint to transition to PRINTING state via MQTT
+            await new Promise(resolve => setTimeout(resolve, 2500));
 
-                    // Subscribe to Zustand store — MQTT updates printer state here.
-                    // Await until MQTT broadcasts that the printer is no longer printing.
-                    testSuccessResult = await new Promise((resolve) => {
-                        const TIMEOUT_MS = 10 * 60 * 1000; // 10-min safety cap per module
-                        const timeoutHandle = setTimeout(() => {
-                            unsub();
-                            addLogEntry(`WARN: [${moduleKey.toUpperCase()}] timed out — no completion signal received.`, "SYS");
-                            resolve(false);
-                        }, TIMEOUT_MS);
+            // Subscribe to Zustand store — MQTT updates printer state here.
+            // Await until MQTT broadcasts that the printer is no longer printing.
+            testSuccessResult = await new Promise((resolve) => {
+              const TIMEOUT_MS = 10 * 60 * 1000; // 10-min safety cap per module
+              const timeoutHandle = setTimeout(() => {
+                unsub();
+                addLogEntry(`WARN: [${moduleKey.toUpperCase()}] timed out — no completion signal received.`, "SYS");
+                resolve(false);
+              }, TIMEOUT_MS);
 
-                        const unsub = useFleetStore.subscribe(
-                            (state) => state.printers[activePrinterId],
-                            (printer) => {
-                                if (!printer) return;
-                                const printing = !!(printer.status?.isPrinting || printer.isPrinting);
-                                const jobState = (printer.status?.state || printer.state || '').toUpperCase();
+              const unsub = useFleetStore.subscribe(
+                (state) => state.printers[activePrinterId],
+                (printer) => {
+                  if (!printer) return;
+                  const printing = !!(printer.status?.isPrinting || printer.isPrinting);
+                  const jobState = (printer.status?.state || printer.state || '').toUpperCase();
 
-                                if (!printing || jobState === 'PRINTDONE' || jobState === 'PRINTFAILED' || jobState === 'PRINTCANCELLED') {
-                                    clearTimeout(timeoutHandle);
-                                    unsub();
-                                    resolve(jobState !== 'PRINTFAILED' && jobState !== 'PRINTCANCELLED');
-                                }
-                            }
-                        );
-                    });
-
-                    // Clean up per-test file from OctoPrint after completion
-                    await OctoPrintControlService.deleteFile(ip, apiKey, fileName);
+                  if (!printing || jobState === 'PRINTDONE' || jobState === 'PRINTFAILED' || jobState === 'PRINTCANCELLED') {
+                    clearTimeout(timeoutHandle);
+                    unsub();
+                    resolve(jobState !== 'PRINTFAILED' && jobState !== 'PRINTCANCELLED');
+                  }
                 }
-            } catch(err) {
-                console.error("Calibration Stream Error:", err);
-                addLogEntry(`ERROR: Unhandled exception during ${moduleKey} stream dispatch.`, "SYS");
-            }
-        } else {
-            // --- STANDALONE MODE: Inject into local visual simulator ---
-            try {
-                const { GCodeLoader } = await import('../../../gcode/gcode_loader.js');
-                const loader = new GCodeLoader();
-                loader.parse(chunkGcode);
-                const { AppContext } = await import('../../../app_context.js');
-                const printerObj = AppContext.farm.printers.find(p => p.id === activePrinterId);
-                if (printerObj) {
-                    printerObj.standalone.load(loader.moves);
-                    useFleetStore.getState().setPrintCommand('start');
-                }
-            } catch(err) {
-                console.error("Calibration Load Error:", err);
-                addLogEntry(`ERROR: Failed to inject ${moduleKey} routine into simulator.`, "SYS");
-            }
-            // Simulated timing for visual feedback in standalone mode
-            testSuccessResult = await simulateAssetHardwarePolling(moduleKey);
-        }
+              );
+            });
 
-        currentResults = [...currentResults];
-        currentResults[currentResults.length - 1].status = testSuccessResult ? 'pass' : 'fail';
-        updateCalibrationState({ results: currentResults });
-
-        if (testSuccessResult) {
-            addLogEntry(`SUCCESS: Asset feedback within nominal metrics for [${moduleKey.toUpperCase()}]`, "SYS");
-        } else {
-            addLogEntry(`CRITICAL: Diagnostic anomaly captured on [${moduleKey.toUpperCase()}]`, "SYS");
+            // Clean up per-test file from OctoPrint after completion
+            await OctoPrintControlService.deleteFile(ip, apiKey, fileName);
+          }
+        } catch (err) {
+          console.error("Calibration Stream Error:", err);
+          addLogEntry(`ERROR: Unhandled exception during ${moduleKey} stream dispatch.`, "SYS");
         }
+      } else {
+        // --- STANDALONE MODE: Inject into local visual simulator ---
+        try {
+          const { GCodeLoader } = await import('../../../gcode/gcode_loader.js');
+          const loader = new GCodeLoader();
+          loader.parse(chunkGcode);
+          const { AppContext } = await import('../../../app_context.js');
+          const printerObj = AppContext.farm.printers.find(p => p.id === activePrinterId);
+          if (printerObj) {
+            printerObj.standalone.load(loader.moves);
+            useFleetStore.getState().setPrintCommand('start');
+          }
+        } catch (err) {
+          console.error("Calibration Load Error:", err);
+          addLogEntry(`ERROR: Failed to inject ${moduleKey} routine into simulator.`, "SYS");
+        }
+        // Simulated timing for visual feedback in standalone mode
+        testSuccessResult = await simulateAssetHardwarePolling(moduleKey);
+      }
+
+      currentResults = [...currentResults];
+      currentResults[currentResults.length - 1].status = testSuccessResult ? 'pass' : 'fail';
+      updateCalibrationState({ results: currentResults });
+
+      if (testSuccessResult) {
+        addLogEntry(`SUCCESS: Asset feedback within nominal metrics for [${moduleKey.toUpperCase()}]`, "SYS");
+      } else {
+        addLogEntry(`CRITICAL: Diagnostic anomaly captured on [${moduleKey.toUpperCase()}]`, "SYS");
+      }
     }
 
     updateCalibrationState({ isRunning: false, currentStepText: "Routine completed." });
@@ -663,506 +667,507 @@ export function FleetSidebar() {
 
   return (
     <>
-    <aside className={`left-sidebar ${!paneStates.left ? 'collapsed' : ''}`} onClick={() => setOpenContextMenuId(null)}>
-      <button className="pane-toggle-btn" id="toggle-left" onClick={() => togglePane('left')}>
-        {paneStates.left ? '◀' : '▶'}
-      </button>
+      <aside className={`left-sidebar ${!paneStates.left ? 'collapsed' : ''}`} onClick={() => setOpenContextMenuId(null)}>
+        <button className="pane-toggle-btn" id="toggle-left" onClick={() => togglePane('left')}>
+          {paneStates.left ? '◀' : '▶'}
+        </button>
 
-      <nav className="icon-rail">
-        <div className="nav-icon active">⬢</div>
-        <div className="nav-icon" id="rail-printer-icon">⎙</div>
-        <div className="nav-icon">⚀</div>
-        <div className="nav-icon">⚙</div>
-      </nav>
+        <nav className="icon-rail" style={{ display: 'none' }}>
+          <div className="nav-icon active">⬢</div>
+          <div className="nav-icon" id="rail-printer-icon">⎙</div>
+          <div className="nav-icon">⚀</div>
+          <div className="nav-icon">⚙</div>
+        </nav>
 
-      {activeControlAssetId === null ? (
-        <section className="pane fleet-manager">
-          <div className="pane-header" style={{ position: 'relative' }}>
-            FLEET NAVIGATION
-            <span
-              className="add-btn"
-              id="global-add-fleet"
-              title="Add Group or Asset"
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleModal('globalAddMenu');
-              }}
-            >+</span>
+        {activeControlAssetId === null ? (
+          <section className="pane fleet-manager">
+            <div className="pane-header" style={{ position: 'relative' }}>
+              FLEET NAVIGATION
+              <span
+                className="add-btn"
+                id="global-add-fleet"
+                title="Add Group or Asset"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleModal('globalAddMenu');
+                }}
+              >+</span>
 
-            {uiModals.globalAddMenu && (
-              <ul className="status-dropdown" id="global-add-menu" style={{ display: 'block', position: 'absolute', top: '35px', right: 0, width: '140px', zIndex: 100 }}>
-                <li onClick={() => {
-                  setTargetWizardGroupId("unassigned");
-                  toggleModal('globalAddMenu', false);
-                  toggleModal('assetWizard', true);
-                }}>+ New Asset</li>
-                <li onClick={handleAddGroup}>+ New Group</li>
-              </ul>
-            )}
-          </div>
+              {uiModals.globalAddMenu && (
+                <ul className="status-dropdown" id="global-add-menu" style={{ display: 'block', position: 'absolute', top: '35px', right: 0, width: '140px', zIndex: 100 }}>
+                  <li onClick={() => {
+                    setTargetWizardGroupId("unassigned");
+                    toggleModal('globalAddMenu', false);
+                    toggleModal('assetWizard', true);
+                  }}>+ New Asset</li>
+                  <li onClick={handleAddGroup}>+ New Group</li>
+                </ul>
+              )}
+            </div>
 
-          <div className="search-box">
-            <input
-              type="text"
-              placeholder=" Search nodes..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
+            <div className="search-box">
+              <input
+                type="text"
+                placeholder=" Search nodes..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
 
-          <div className="tree-container" id="fleet-tree">
-            {filteredGroups.map((group) => (
-              <div key={group.id} className="group-wrapper">
-                <div
-                  className={`group-node ${group.isOpen ? 'open' : ''}`}
-                  onClick={() => toggleGroup(group.id)}
-                >
-                  <span>{group.groupName.toUpperCase()}</span>
-                  <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <span className="add-btn-quick" title="Quick Add Asset" onClick={(e) => handleQuickAdd(e, group.id)}>+</span>
-                    {group.canDelete && <span className="action-icon" style={{ marginLeft: '10px', color: 'var(--accent-red)' }} onClick={(e) => { e.stopPropagation(); deleteGroup(group.id); }}>🗑</span>}
-                  </div>
-                </div>
-
-                {group.isOpen && (
-                  <ul className="asset-list">
-                    {group.assets.length === 0 ? (
-                      <li className="tree-node empty-msg" style={{ opacity: 0.5, fontStyle: 'italic', paddingLeft: '20px' }}>Empty Group</li>
-                    ) : (
-                      group.assets.map((asset) => (
-                        <li
-                          key={asset.id}
-                          className="tree-node"
-                          onDoubleClick={() => handleAssetDoubleClick(asset.id)}
-                        >
-                          <span className="asset-label">
-                            <span className="status-dot green">●</span>
-                            {asset.name}
-                          </span>
-                          <div className="asset-actions" style={{ visibility: 'visible', opacity: 1 }}>
-                            <span className="three-dots" onClick={(e) => toggleContextMenu(e, asset.id)}>⋮</span>
-                            {openContextMenuId === asset.id && (
-                              <ul className="asset-context-menu" style={{ display: 'block' }}>
-                                <li onClick={() => { useFleetStore.getState().setActivePrinter(asset.id); setOpenContextMenuId(null); }}>🔍 Focus 3D View</li>
-                                <li onClick={() => handleAssetDoubleClick(asset.id)}>▶ Start Control</li>
-                                <li onClick={() => { setSelectedAssetForReconfig(asset); setTargetWizardGroupId(group.id); toggleModal('assetWizard', true); }}>⚙ Reconfigure</li>
-                                <li onClick={() => { moveAsset(asset.id, "unassigned"); setOpenContextMenuId(null); }}>📤 Move to Unassigned</li>
-                                <li style={{ color: 'var(--accent-red)' }} onClick={() => deleteAsset(group.id, asset.id)}>✕ Delete Asset</li>
-                              </ul>
-                            )}
-                          </div>
-                        </li>
-                      ))
-                    )}
-                  </ul>
-                )}
-              </div>
-            ))}
-          </div>
-        </section>
-
-      ) : (
-        <section className="pane fleet-manager">
-          <div className="pane-header">
-            <span>CONTROL: {activeAsset?.name}</span>
-            <span className="close-x-btn" onClick={() => setControlAsset(null)}>×</span>
-          </div>
-
-          <div className="control-tabs">
-            <div
-              className={`tab ${controlTab === 'print' ? 'active' : ''}`}
-              onClick={() => setControlTab('print')}
-            >PRINTING</div>
-            <div
-              className={`tab ${controlTab === 'calib' ? 'active' : ''} ${activeJob.mode === 'mock_replay' ? 'disabled' : ''}`}
-              onClick={() => activeJob.mode !== 'mock_replay' && setControlTab('calib')}
-              style={activeJob.mode === 'mock_replay' ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
-            >CALIBRATION</div>
-          </div>
-
-          <div className="print-control-body">
-            {controlTab === 'print' ? (
-              <div id="tab-print" className="tab-content active" style={{ display: 'block' }}>
-                {activeJob.mode === 'stream' && (
-                  <div className="temp-control-section">
-                    <div
-                      className="temp-section-title"
-                      style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', userSelect: 'none' }}
-                      onClick={() => setShowConnectionPanel(!showConnectionPanel)}
-                    >
-                      <span>Serial Connection</span>
-                      <span>{showConnectionPanel ? '▲' : '▼'}</span>
+            <div className="tree-container" id="fleet-tree">
+              {filteredGroups.map((group) => (
+                <div key={group.id} className="group-wrapper">
+                  <div
+                    className={`group-node ${group.isOpen ? 'open' : ''}`}
+                    onClick={() => toggleGroup(group.id)}
+                  >
+                    <span>{group.groupName.toUpperCase()}</span>
+                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                      <span className="add-btn-quick" title="Quick Add Asset" onClick={(e) => handleQuickAdd(e, group.id)}>+</span>
+                      {group.canDelete && <span className="action-icon" style={{ marginLeft: '10px', color: 'var(--accent-red)' }} onClick={(e) => { e.stopPropagation(); deleteGroup(group.id); }}>🗑</span>}
                     </div>
+                  </div>
 
-                    {showConnectionPanel && (
-                      <div style={{ marginTop: '10px' }}>
-                        <div className="meta-row" style={{ marginBottom: '10px' }}>
-                          <span>State:</span>
-                          <span style={{
-                            color: connectionData?.current?.state === 'Operational' ? 'var(--accent-green)' :
-                              connectionData?.current?.state === 'Offline' ? 'var(--text-dim)' : 'var(--accent-amber)',
-                            fontWeight: 'bold'
-                          }}>
-                            {connectionData?.current?.state || 'Unknown'}
-                          </span>
-                        </div>
-
-                        <div className="preset-group" style={{ marginBottom: '10px' }}>
-                          <div className="temp-input-wrapper">
-                            <label>Serial Port</label>
-                            <select
-                              className="industrial-select"
-                              value={selectedPort}
-                              onChange={(e) => setSelectedPort(e.target.value)}
-                            >
-                              <option value="AUTO">AUTO</option>
-                              {connectionData?.options?.ports?.map(p => (
-                                <option key={p} value={p}>{p}</option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
-
-                        <div className="preset-group" style={{ marginBottom: '10px' }}>
-                          <div className="temp-input-wrapper">
-                            <label>Baudrate</label>
-                            <select
-                              className="industrial-select"
-                              value={selectedBaudrate}
-                              onChange={(e) => setSelectedBaudrate(e.target.value)}
-                            >
-                              <option value="AUTO">AUTO</option>
-                              {connectionData?.options?.baudrates?.map(b => (
-                                <option key={b} value={b}>{b}</option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
-
-                        <div style={{ display: 'flex', gap: '10px' }}>
-                          <button
-                            className="action-btn"
-                            style={{ flex: 1, height: '32px' }}
-                            onClick={handleConnect}
-                            disabled={connectionData?.current?.state === 'Operational'}
+                  {group.isOpen && (
+                    <ul className="asset-list">
+                      {group.assets.length === 0 ? (
+                        <li className="tree-node empty-msg" style={{ opacity: 0.5, fontStyle: 'italic', paddingLeft: '20px' }}>Empty Group</li>
+                      ) : (
+                        group.assets.map((asset) => (
+                          <li
+                            key={asset.id}
+                            className="tree-node"
+                            onDoubleClick={() => handleAssetDoubleClick(asset.id)}
                           >
-                            CONNECT
-                          </button>
-                          <button
-                            className="secondary-btn"
-                            style={{ flex: 1, height: '32px' }}
-                            onClick={handleDisconnect}
-                            disabled={connectionData?.current?.state === 'Offline'}
-                          >
-                            DISCONNECT
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {/* DB selector — only shown in mock_replay mode */}
-                {activeJob.mode === 'mock_replay' && (
-                  <div style={{ marginBottom: '8px' }}>
-                    <label style={{ fontSize: '9px', color: 'var(--text-dim)', letterSpacing: '0.05em', display: 'block', marginBottom: '4px' }}>TELEMETRY SOURCE</label>
-                    <select
-                      className="industrial-select"
-                      style={{ width: '100%', fontSize: '11px' }}
-                      value={selectedDb}
-                      onChange={(e) => {
-                        setSelectedDb(e.target.value);
-                        // Reset filename when switching DB
-                        if (!activeJob.isPrinting) {
-                          updateActiveJob({ fileName: 'No file selected', progress: 0 });
-                        }
-                      }}
-                      disabled={activeJob.isPrinting}
-                    >
-                      <option value="">— Synthetic (generated) —</option>
-                      <option value="/sample_telemetry/telemetry_normal_3.db">Normal Print (telemetry_normal_3.db)</option>
-                      <option value="/sample_telemetry/telemetry_temp_err.db">Thermal Fault (telemetry_temp_err.db)</option>
-                    </select>
-                  </div>
-                )}
-
-                <div className="job-status-card" style={{ marginBottom: "5px" }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                    <label style={{ fontSize: '9px', color: 'var(--text-dim)', letterSpacing: '0.05em' }}>ACTIVE FILE</label>
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '5px',
-                      fontSize: '8px',
-                      fontWeight: 'bold',
-                      color: status.color,
-                      background: 'rgba(255, 255, 255, 0.03)',
-                      padding: '2px 6px',
-                      borderRadius: '3px',
-                      border: '1px solid rgba(255, 255, 255, 0.05)',
-                      boxShadow: `0 0 8px ${status.glow}20`
-                    }}>
-                      <span className={activeJob.isPrinting && !activeJob.isPaused ? "status-pulse-dot" : ""} style={{
-                        width: '5px',
-                        height: '5px',
-                        borderRadius: '50%',
-                        background: status.color,
-                        display: 'inline-block',
-                        boxShadow: `0 0 5px ${status.color}`
-                      }}></span>
-                      {status.text}
-                    </div>
-                  </div>
-                  <div id="active-filename" style={{ fontSize: '12px', margin: '5px 0', color: 'var(--accent-green)', fontWeight: 'bold', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activeJob.fileName}</div>
-                  <div className="progress-bar-container">
-                    <div id="print-progress-fill" className="progress-fill" style={{ width: `${activeJob.progress}%` }}></div>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px' }}>
-                    <span>{activeJob.progress}%</span>
-                    <span>Est: {remainingTimeStr}</span>
-                  </div>
-                </div>
-
-                <div className="control-grid">
-                  <button
-                    className="action-btn btn-start"
-                    onClick={handleStartPrint}
-                    disabled={activeJob.isPrinting || (activeJob.mode !== 'mock_replay' && activeJob.fileName === "No file selected")}
-                  >
-                    START
-                  </button>
-                  <button
-                    className={`secondary-btn ${activeJob.isPaused ? "btn-paused-breathe" : ""}`}
-                    onClick={handlePausePrint}
-                    disabled={!activeJob.isPrinting}
-                  >
-                    {activeJob.isPaused ? "CONTINUE" : "PAUSE"}
-                  </button>
-                  <button
-                    className="secondary-btn"
-                    onClick={() => document.getElementById('global-file-input').click()}
-                    disabled={activeJob.mode === 'mock_replay'}
-                    style={activeJob.mode === 'mock_replay' ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
-                  >
-                    UPLOAD
-                  </button>
-                  <button
-                    className="action-btn btn-abort"
-                    onClick={handleAbortPrint}
-                    disabled={!activeJob.isPrinting}
-                    style={{ background: 'var(--accent-red)', color: '#fff' }}
-                  >
-                    ABORT
-                  </button>
-                  <button
-                    className="secondary-btn"
-                    onClick={handleDownloadFile}
-                    disabled={activeJob.fileName === "No file selected" || activeJob.mode !== 'stream' || activeJob.mode === 'mock_replay'}
-                    style={activeJob.mode === 'mock_replay' ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
-                  >
-                    DOWNLOAD
-                  </button>
-                  <button
-                    className="secondary-btn"
-                    onClick={handleDeleteFile}
-                    disabled={activeJob.fileName === "No file selected" || activeJob.isPrinting || activeJob.mode === 'mock_replay'}
-                    style={activeJob.mode === 'mock_replay' ? { color: 'var(--accent-red)', opacity: 0.5, cursor: 'not-allowed' } : { color: 'var(--accent-red)' }}
-                  >
-                    DELETE
-                  </button>
-                </div>
-
-                <div className="file-metadata-pane">
-                  <div className="meta-row"><span>Total lines:</span> <span>{activeJob.lines}</span></div>
-                  <div className="meta-row"><span>Parsed moves:</span> <span>{activeJob.moves}</span></div>
-                  <div className="meta-row"><span>Skipped lines:</span> <span>{activeJob.skipped}</span></div>
-                  <div className="meta-row"><span>Layers:</span> <span>{activeJob.layers}</span></div>
-                  <div className="meta-row"><span>Hotend temp:</span> <span>{activeJob.htemp}</span></div>
-                  <div className="meta-row"><span>Bed temp:</span> <span>{activeJob.btemp}</span></div>
-
-                  <div className="meta-row"><span>Est. filament:</span> <span>{activeJob.filament}</span></div>
-                  <div className="meta-row"><span>Linear advance:</span> <span>{activeJob.kfactor}</span></div>
-                </div>
-
-                <div className="temp-control-section" style={activeJob.mode === 'mock_replay' ? { opacity: 0.5, pointerEvents: 'none' } : {}}>
-                  <div className="temp-section-title">Thermal Management</div>
-                  <div className="preset-group">
-                    <div className="temp-input-wrapper">
-                      <label>Material Presets</label>
-                      <select className="industrial-select" disabled={activeJob.mode === 'mock_replay'}>
-                        <option value="200,60">PLA (200°C / 60°C)</option>
-                        <option value="240,100">ABS (240°C / 100°C)</option>
-                        <option value="230,80">PETG (230°C / 80°C)</option>
-                        <option value="215,60">TPU (215°C / 60°C)</option>
-                      </select>
-                    </div>
-                    <button className="btn-set" onClick={handleApplyPreset} disabled={activeJob.mode === 'mock_replay'}>SET ALL</button>
-                  </div>
-
-                  <div className="manual-temp-group" style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-                    <div className="temp-input-wrapper">
-                      <label>Nozzle (°C)</label>
-                      <input type="number" className="industrial-input" placeholder="200" style={{ width: '100%' }} disabled={activeJob.mode === 'mock_replay'} />
-                    </div>
-                    <button className="btn-set" style={{ height: '32px', alignSelf: 'flex-end' }} onClick={(e) => {
-                      const val = e.target.previousSibling.querySelector('input').value;
-                      handleSetManualTemp('nozzle', val);
-                    }} disabled={activeJob.mode === 'mock_replay'}>SET</button>
-                  </div>
-                  <div className="manual-temp-group" style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-                    <div className="temp-input-wrapper">
-                      <label>Bed (°C)</label>
-                      <input type="number" className="industrial-input" placeholder="60" style={{ width: '100%' }} disabled={activeJob.mode === 'mock_replay'} />
-                    </div>
-                    <button className="btn-set" style={{ height: '32px', alignSelf: 'flex-end' }} onClick={(e) => {
-                      const val = e.target.previousSibling.querySelector('input').value;
-                      handleSetManualTemp('bed', val);
-                    }} disabled={activeJob.mode === 'mock_replay'}>SET</button>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div id="tab-calib" className="tab-content active" style={{ display: 'block' }}>
-
-                {/* Always-visible description */}
-                <div className="calibration-info" style={{ marginBottom: '10px' }}>
-                  {calibrationState.isRunning || calibrationState.results.length > 0 ? (
-                    <>
-                      <p><span className="anomaly-alert" style={{ color: 'var(--accent-green)', animation: 'none' }}>⚙️ RUNNING DIAGNOSTIC HARDWARE ENGINE</span></p>
-                      <p style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '4px' }}>{calibrationState.currentStepText}</p>
-                    </>
-                  ) : (
-                    <p>System health check. Verify hardware integrity before production.</p>
+                            <span className="asset-label">
+                              <span className="status-dot green">●</span>
+                              {asset.name}
+                            </span>
+                            <div className="asset-actions" style={{ visibility: 'visible', opacity: 1 }}>
+                              <span className="three-dots" onClick={(e) => toggleContextMenu(e, asset.id)}>⋮</span>
+                              {openContextMenuId === asset.id && (
+                                <ul className="asset-context-menu" style={{ display: 'block' }}>
+                                  <li onClick={() => { useFleetStore.getState().setActivePrinter(asset.id); setOpenContextMenuId(null); }}>🔍 Focus 3D View</li>
+                                  <li onClick={() => handleAssetDoubleClick(asset.id)}>▶ Start Control</li>
+                                  <li onClick={() => { setSelectedAssetForReconfig(asset); setTargetWizardGroupId(group.id); toggleModal('assetWizard', true); }}>⚙ Reconfigure</li>
+                                  <li onClick={() => { moveAsset(asset.id, "unassigned"); setOpenContextMenuId(null); }}>📤 Move to Unassigned</li>
+                                  <li style={{ color: 'var(--accent-red)' }} onClick={() => deleteAsset(group.id, asset.id)}>✕ Delete Asset</li>
+                                </ul>
+                              )}
+                            </div>
+                          </li>
+                        ))
+                      )}
+                    </ul>
                   )}
                 </div>
+              ))}
+            </div>
+          </section>
 
-                {calibrationState.isRunning || calibrationState.results.length > 0 ? (
-                  <>
-                    <div className="calibration-steps-list" id="cal-steps-progress">
-                      {calibrationState.results.map((res, i) => (
-                        <div key={i} className={`cal-step-row ${res.status === 'processing' ? 'processing' : res.status === 'pass' ? 'success' : 'failed'}`}>
-                          {res.status === 'processing' && <div className="cal-spinner"></div>}
-                          <span>
-                            {res.status === 'processing' ? `EXECUTING: ${res.name}...` :
-                             res.status === 'pass' ? `✔ ${res.name}: COMPLETE (PASSED)` :
-                             `✘ ${res.name}: HARDWARE VARIANCE CRITICAL`}
+        ) : (
+          <section className="pane fleet-manager">
+            <div className="pane-header">
+              <span>CONTROL: {activeAsset?.name}</span>
+              <span className="close-x-btn" onClick={() => setControlAsset(null)}>×</span>
+            </div>
+
+            <div className="control-tabs">
+              <div
+                className={`tab ${controlTab === 'print' ? 'active' : ''}`}
+                onClick={() => setControlTab('print')}
+              >PRINTING</div>
+              <div
+                className={`tab ${controlTab === 'calib' ? 'active' : ''}`}
+                onClick={() => setControlTab('calib')}
+              >CALIBRATION</div>
+            </div>
+
+            <div className="print-control-body">
+              {controlTab === 'print' ? (
+                <div id="tab-print" className="tab-content active" style={{ display: 'block' }}>
+                  {activeJob.mode === 'stream' && (
+                    <div className="temp-control-section">
+                      <div
+                        className="temp-section-title"
+                        style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', userSelect: 'none' }}
+                        onClick={() => setShowConnectionPanel(!showConnectionPanel)}
+                      >
+                        <span>Serial Connection</span>
+                        <span>{showConnectionPanel ? '▲' : '▼'}</span>
+                      </div>
+
+                      {showConnectionPanel && (
+                        <div style={{ marginTop: '10px' }}>
+                          <div className="meta-row" style={{ marginBottom: '10px' }}>
+                            <span>State:</span>
+                            <span style={{
+                              color: connectionData?.current?.state === 'Operational' ? 'var(--accent-green)' :
+                                connectionData?.current?.state === 'Offline' ? 'var(--text-dim)' : 'var(--accent-amber)',
+                              fontWeight: 'bold'
+                            }}>
+                              {connectionData?.current?.state || 'Unknown'}
+                            </span>
+                          </div>
+
+                          <div className="preset-group" style={{ marginBottom: '10px' }}>
+                            <div className="temp-input-wrapper">
+                              <label>Serial Port</label>
+                              <select
+                                className="industrial-select"
+                                value={selectedPort}
+                                onChange={(e) => setSelectedPort(e.target.value)}
+                              >
+                                <option value="AUTO">AUTO</option>
+                                {connectionData?.options?.ports?.map(p => (
+                                  <option key={p} value={p}>{p}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          <div className="preset-group" style={{ marginBottom: '10px' }}>
+                            <div className="temp-input-wrapper">
+                              <label>Baudrate</label>
+                              <select
+                                className="industrial-select"
+                                value={selectedBaudrate}
+                                onChange={(e) => setSelectedBaudrate(e.target.value)}
+                              >
+                                <option value="AUTO">AUTO</option>
+                                {connectionData?.options?.baudrates?.map(b => (
+                                  <option key={b} value={b}>{b}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', gap: '10px' }}>
+                            <button
+                              className="action-btn"
+                              style={{ flex: 1, height: '32px' }}
+                              onClick={handleConnect}
+                              disabled={connectionData?.current?.state === 'Operational'}
+                            >
+                              CONNECT
+                            </button>
+                            <button
+                              className="secondary-btn"
+                              style={{ flex: 1, height: '32px' }}
+                              onClick={handleDisconnect}
+                              disabled={connectionData?.current?.state === 'Offline'}
+                            >
+                              DISCONNECT
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* DB selector — only shown in mock_replay mode */}
+                  {activeJob.mode === 'mock_replay' && (
+                    <div style={{ marginBottom: '8px' }}>
+                      <label style={{ fontSize: '9px', color: 'var(--text-dim)', letterSpacing: '0.05em', display: 'block', marginBottom: '4px' }}>TELEMETRY SOURCE</label>
+                      <select
+                        className="industrial-select"
+                        style={{ width: '100%', fontSize: '11px' }}
+                        value={selectedDb}
+                        onChange={(e) => {
+                          setSelectedDb(e.target.value);
+                          // Reset filename when switching DB
+                          if (!activeJob.isPrinting) {
+                            updateActiveJob({ fileName: 'No file selected', progress: 0 });
+                          }
+                        }}
+                        disabled={activeJob.isPrinting}
+                      >
+                        <option value="">— Synthetic (generated) —</option>
+                        <option value="/sample_telemetry/telemetry_normal_3.db">Incomplete benchy print</option>
+                        {/* <option value="/sample_telemetry/telemetry_normal_4.db">Normal Print (telemetry_normal_4.db)</option> */}
+                      </select>
+                    </div>
+                  )}
+
+                  <div className="job-status-card" style={{ marginBottom: "5px" }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                      <label style={{ fontSize: '9px', color: 'var(--text-dim)', letterSpacing: '0.05em' }}>ACTIVE FILE</label>
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '5px',
+                        fontSize: '8px',
+                        fontWeight: 'bold',
+                        color: status.color,
+                        background: 'rgba(255, 255, 255, 0.03)',
+                        padding: '2px 6px',
+                        borderRadius: '3px',
+                        border: '1px solid rgba(255, 255, 255, 0.05)',
+                        boxShadow: `0 0 8px ${status.glow}20`
+                      }}>
+                        <span className={activeJob.isPrinting && !activeJob.isPaused ? "status-pulse-dot" : ""} style={{
+                          width: '5px',
+                          height: '5px',
+                          borderRadius: '50%',
+                          background: status.color,
+                          display: 'inline-block',
+                          boxShadow: `0 0 5px ${status.color}`
+                        }}></span>
+                        {status.text}
+                      </div>
+                    </div>
+                    <div id="active-filename" style={{ fontSize: '12px', margin: '5px 0', color: 'var(--accent-green)', fontWeight: 'bold', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activeJob.fileName}</div>
+                    <div className="progress-bar-container">
+                      <div id="print-progress-fill" className="progress-fill" style={{ width: `${activeJob.progress}%` }}></div>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px' }}>
+                      <span>{activeJob.progress}%</span>
+                      <span>Est: {remainingTimeStr}</span>
+                    </div>
+                  </div>
+
+                  <div className="control-grid">
+                    <button
+                      className="action-btn btn-start"
+                      onClick={handleStartPrint}
+                      disabled={activeJob.isPrinting || (activeJob.mode !== 'mock_replay' && activeJob.fileName === "No file selected") || activeJob.mode === 'disconnected'}
+                      style={activeJob.mode === 'disconnected' ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
+                    >
+                      START
+                    </button>
+                    <button
+                      className={`secondary-btn ${activeJob.isPaused ? "btn-paused-breathe" : ""}`}
+                      onClick={handlePausePrint}
+                      disabled={!activeJob.isPrinting || activeJob.mode === 'disconnected'}
+                      style={activeJob.mode === 'disconnected' ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
+                    >
+                      {activeJob.isPaused ? "CONTINUE" : "PAUSE"}
+                    </button>
+                    <button
+                      className="secondary-btn"
+                      onClick={() => document.getElementById('global-file-input').click()}
+                      disabled={activeJob.mode === 'mock_replay' || activeJob.mode === 'disconnected'}
+                      style={activeJob.mode === 'mock_replay' || activeJob.mode === 'disconnected' ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
+                    >
+                      UPLOAD
+                    </button>
+                    <button
+                      className="action-btn btn-abort"
+                      onClick={handleAbortPrint}
+                      disabled={!activeJob.isPrinting || activeJob.mode === 'disconnected'}
+                      style={{ background: 'var(--accent-red)', color: '#fff', opacity: activeJob.mode === 'disconnected' ? 0.5 : 1, cursor: activeJob.mode === 'disconnected' ? 'not-allowed' : 'pointer' }}
+                    >
+                      ABORT
+                    </button>
+                    <button
+                      className="secondary-btn"
+                      onClick={handleDownloadFile}
+                      disabled={activeJob.fileName === "No file selected" || activeJob.mode !== 'stream' || activeJob.mode === 'mock_replay' || activeJob.mode === 'disconnected'}
+                      style={activeJob.mode === 'mock_replay' || activeJob.mode === 'disconnected' ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
+                    >
+                      DOWNLOAD
+                    </button>
+                    <button
+                      className="secondary-btn"
+                      onClick={handleDeleteFile}
+                      disabled={activeJob.fileName === "No file selected" || activeJob.isPrinting || activeJob.mode === 'mock_replay' || activeJob.mode === 'disconnected'}
+                      style={activeJob.mode === 'mock_replay' || activeJob.mode === 'disconnected' ? { color: 'var(--accent-red)', opacity: 0.5, cursor: 'not-allowed' } : { color: 'var(--accent-red)' }}
+                    >
+                      DELETE
+                    </button>
+                  </div>
+
+                  <div className="file-metadata-pane">
+                    <div className="meta-row"><span>Total lines:</span> <span>{activeJob.lines}</span></div>
+                    <div className="meta-row"><span>Parsed moves:</span> <span>{activeJob.moves}</span></div>
+                    <div className="meta-row"><span>Skipped lines:</span> <span>{activeJob.skipped}</span></div>
+                    <div className="meta-row"><span>Layers:</span> <span>{activeJob.layers}</span></div>
+                    <div className="meta-row"><span>Hotend temp:</span> <span>{activeJob.htemp}</span></div>
+                    <div className="meta-row"><span>Bed temp:</span> <span>{activeJob.btemp}</span></div>
+
+                    <div className="meta-row"><span>Est. filament:</span> <span>{activeJob.filament}</span></div>
+                    <div className="meta-row"><span>Linear advance:</span> <span>{activeJob.kfactor}</span></div>
+                  </div>
+
+                  <div className="temp-control-section" style={activeJob.mode !== 'stream' ? { opacity: 0.5, pointerEvents: 'none' } : {}}>
+                    <div className="temp-section-title">Thermal Management</div>
+                    <div className="preset-group">
+                      <div className="temp-input-wrapper">
+                        <label>Material Presets</label>
+                        <select className="industrial-select" disabled={activeJob.mode !== 'stream'}>
+                          <option value="200,60">PLA (200°C / 60°C)</option>
+                          <option value="240,100">ABS (240°C / 100°C)</option>
+                          <option value="230,80">PETG (230°C / 80°C)</option>
+                          <option value="215,60">TPU (215°C / 60°C)</option>
+                        </select>
+                      </div>
+                      <button className="btn-set" onClick={handleApplyPreset} disabled={activeJob.mode !== 'stream'}>SET ALL</button>
+                    </div>
+
+                    <div className="manual-temp-group" style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                      <div className="temp-input-wrapper">
+                        <label>Nozzle (°C)</label>
+                        <input type="number" className="industrial-input" placeholder="200" style={{ width: '100%' }} disabled={activeJob.mode !== 'stream'} />
+                      </div>
+                      <button className="btn-set" style={{ height: '32px', alignSelf: 'flex-end' }} onClick={(e) => {
+                        const val = e.target.previousSibling.querySelector('input').value;
+                        handleSetManualTemp('nozzle', val);
+                      }} disabled={activeJob.mode !== 'stream'}>SET</button>
+                    </div>
+                    <div className="manual-temp-group" style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                      <div className="temp-input-wrapper">
+                        <label>Bed (°C)</label>
+                        <input type="number" className="industrial-input" placeholder="60" style={{ width: '100%' }} disabled={activeJob.mode !== 'stream'} />
+                      </div>
+                      <button className="btn-set" style={{ height: '32px', alignSelf: 'flex-end' }} onClick={(e) => {
+                        const val = e.target.previousSibling.querySelector('input').value;
+                        handleSetManualTemp('bed', val);
+                      }} disabled={activeJob.mode !== 'stream'}>SET</button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div id="tab-calib" className="tab-content active" style={{ display: 'block' }}>
+
+                  {/* Always-visible description */}
+                  <div className="calibration-info" style={{ marginBottom: '10px' }}>
+                    {calibrationState.isRunning || calibrationState.results.length > 0 ? (
+                      <>
+                        <p><span className="anomaly-alert" style={{ color: 'var(--accent-green)', animation: 'none' }}>⚙️ RUNNING DIAGNOSTIC HARDWARE ENGINE</span></p>
+                        <p style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '4px' }}>{calibrationState.currentStepText}</p>
+                      </>
+                    ) : (
+                      <p>System health check. Verify hardware integrity before production.</p>
+                    )}
+                  </div>
+
+                  {calibrationState.isRunning || calibrationState.results.length > 0 ? (
+                    <>
+                      <div className="calibration-steps-list" id="cal-steps-progress">
+                        {calibrationState.results.map((res, i) => (
+                          <div key={i} className={`cal-step-row ${res.status === 'processing' ? 'processing' : res.status === 'pass' ? 'success' : 'failed'}`}>
+                            {res.status === 'processing' && <div className="cal-spinner"></div>}
+                            <span>
+                              {res.status === 'processing' ? `EXECUTING: ${res.name}...` :
+                                res.status === 'pass' ? `✔ ${res.name}: COMPLETE (PASSED)` :
+                                  `✘ ${res.name}: HARDWARE VARIANCE CRITICAL`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {!calibrationState.isRunning && calibrationState.results.some(r => r.status === 'fail') && (
+                        <div className="troubleshooting-guides">
+                          {calibrationState.results.filter(r => r.status === 'fail').map(r => {
+                            const guide = TROUBLESHOOTING_DATA[r.id];
+                            if (!guide) return null;
+                            return (
+                              <div className="diagnostic-guide-box" key={r.id}>
+                                <div className="diagnostic-title">⚠️ {guide.title}</div>
+                                <ul className="diagnostic-steps">
+                                  {guide.steps.map((step, idx) => (
+                                    <li key={idx}>{step}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {!calibrationState.isRunning && calibrationState.results.length > 0 && (
+                        <button className="action-btn" style={{ marginTop: '15px', width: '100%' }} onClick={() => updateCalibrationState({ results: [], generatedGcode: '' })}>
+                          FINALIZE & RESET STACK
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="calibration-options">
+                        <label className="check-container select-all">
+                          <input
+                            type="checkbox"
+                            checked={calibrationState.selectedTests.extrusion && calibrationState.selectedTests.movement && calibrationState.selectedTests.thermal}
+                            onChange={(e) => {
+                              const val = e.target.checked;
+                              updateCalibrationState({ selectedTests: { extrusion: val, movement: val, thermal: val } });
+                            }}
+                          />
+                          <span className="checkmark"></span> SELECT ALL MODULES
+                        </label>
+
+                        <hr style={{ border: 0, borderTop: '1px solid var(--border)', margin: '10px 0' }} />
+
+                        <label className="check-container">
+                          <input type="checkbox" className="cal-opt" checked={calibrationState.selectedTests.extrusion} onChange={() => toggleCalibrationTest('extrusion')} />
+                          <span className="checkmark"></span> Extrusion Test (E-Steps)
+                        </label>
+                        <label className="check-container">
+                          <input type="checkbox" className="cal-opt" checked={calibrationState.selectedTests.movement} onChange={() => toggleCalibrationTest('movement')} />
+                          <span className="checkmark"></span> Movement (X/Y/Z Squaring)
+                        </label>
+                        <label className="check-container">
+                          <input type="checkbox" className="cal-opt" checked={calibrationState.selectedTests.thermal} onChange={() => toggleCalibrationTest('thermal')} />
+                          <span className="checkmark"></span> Thermal Stability (PID)
+                        </label>
+                      </div>
+
+                      <button className="secondary-btn" style={{ width: '100%', marginTop: '15px', borderColor: 'var(--accent-green)', color: '#fff' }} onClick={openGCodeModal}>
+                        🔍 INSPECT GENERATED G-CODE
+                      </button>
+
+                      <div className="calib-footer" style={{ marginTop: '20px' }}>
+                        <div className="est-time">
+                          Est. Duration: <span style={{ fontWeight: 'bold', color: 'var(--accent-green)' }}>
+                            {(() => {
+                              let secs = 0;
+                              if (calibrationState.selectedTests.extrusion) secs += 6;
+                              if (calibrationState.selectedTests.movement) secs += 8;
+                              if (calibrationState.selectedTests.thermal) secs += 10;
+                              if (secs === 0) return '0m';
+                              const m = Math.floor(secs / 60);
+                              const s = secs % 60;
+                              return m > 0 ? `${m}m ${s}s` : `${s}s`;
+                            })()}
                           </span>
                         </div>
-                      ))}
-                    </div>
-                    
-                    {!calibrationState.isRunning && calibrationState.results.some(r => r.status === 'fail') && (
-                        <div className="troubleshooting-guides">
-                            {calibrationState.results.filter(r => r.status === 'fail').map(r => {
-                                const guide = TROUBLESHOOTING_DATA[r.id];
-                                if (!guide) return null;
-                                return (
-                                    <div className="diagnostic-guide-box" key={r.id}>
-                                        <div className="diagnostic-title">⚠️ {guide.title}</div>
-                                        <ul className="diagnostic-steps">
-                                            {guide.steps.map((step, idx) => (
-                                                <li key={idx}>{step}</li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    )}
-
-                    {!calibrationState.isRunning && calibrationState.results.length > 0 && (
-                      <button className="action-btn" style={{ marginTop: '15px', width: '100%' }} onClick={() => updateCalibrationState({ results: [], generatedGcode: '' })}>
-                        FINALIZE & RESET STACK
-                      </button>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <div className="calibration-options">
-                      <label className="check-container select-all">
-                        <input
-                          type="checkbox"
-                          checked={calibrationState.selectedTests.extrusion && calibrationState.selectedTests.movement && calibrationState.selectedTests.thermal}
-                          onChange={(e) => {
-                            const val = e.target.checked;
-                            updateCalibrationState({ selectedTests: { extrusion: val, movement: val, thermal: val } });
-                          }}
-                        />
-                        <span className="checkmark"></span> SELECT ALL MODULES
-                      </label>
-
-                      <hr style={{ border: 0, borderTop: '1px solid var(--border)', margin: '10px 0' }} />
-
-                      <label className="check-container">
-                        <input type="checkbox" className="cal-opt" checked={calibrationState.selectedTests.extrusion} onChange={() => toggleCalibrationTest('extrusion')} />
-                        <span className="checkmark"></span> Extrusion Test (E-Steps)
-                      </label>
-                      <label className="check-container">
-                        <input type="checkbox" className="cal-opt" checked={calibrationState.selectedTests.movement} onChange={() => toggleCalibrationTest('movement')} />
-                        <span className="checkmark"></span> Movement (X/Y/Z Squaring)
-                      </label>
-                      <label className="check-container">
-                        <input type="checkbox" className="cal-opt" checked={calibrationState.selectedTests.thermal} onChange={() => toggleCalibrationTest('thermal')} />
-                        <span className="checkmark"></span> Thermal Stability (PID)
-                      </label>
-                    </div>
-
-                    <button className="secondary-btn" style={{ width: '100%', marginTop: '15px', borderColor: 'var(--accent-green)', color: '#fff' }} onClick={openGCodeModal}>
-                      🔍 INSPECT GENERATED G-CODE
-                    </button>
-
-                    <div className="calib-footer" style={{ marginTop: '20px' }}>
-                      <div className="est-time">
-                        Est. Duration: <span style={{ fontWeight: 'bold', color: 'var(--accent-green)' }}>
-                          {(() => {
-                            let secs = 0;
-                            if (calibrationState.selectedTests.extrusion) secs += 6;
-                            if (calibrationState.selectedTests.movement) secs += 8;
-                            if (calibrationState.selectedTests.thermal) secs += 10;
-                            if (secs === 0) return '0m';
-                            const m = Math.floor(secs / 60);
-                            const s = secs % 60;
-                            return m > 0 ? `${m}m ${s}s` : `${s}s`;
-                          })()}
-                        </span>
+                        <button
+                          className="action-btn"
+                          style={{ width: '100%', marginTop: '10px' }}
+                          onClick={handleStartCalibration}
+                          disabled={!calibrationState.selectedTests.extrusion && !calibrationState.selectedTests.movement && !calibrationState.selectedTests.thermal}
+                        >
+                          START TEST
+                        </button>
                       </div>
-                      <button
-                        className="action-btn"
-                        style={{ width: '100%', marginTop: '10px' }}
-                        onClick={handleStartCalibration}
-                        disabled={!calibrationState.selectedTests.extrusion && !calibrationState.selectedTests.movement && !calibrationState.selectedTests.thermal}
-                      >
-                        START TEST
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-    </aside>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+      </aside>
 
-    {uiModals.gcodeModal && (
-      <div className="cal-modal-overlay active" id="gcode-modal-overlay" style={{ position: 'fixed', zIndex: 9999 }}>
-        <div className="cal-modal-window">
+      {uiModals.gcodeModal && (
+        <div className="cal-modal-overlay active" id="gcode-modal-overlay" style={{ position: 'fixed', zIndex: 9999 }}>
+          <div className="cal-modal-window">
             <div className="pane-header">
-                <span>🖨️ COMPILED G-CODE SEQUENCE INSPECTOR</span>
-                <span className="close-x-btn" onClick={closeGCodeModal}>×</span>
+              <span>🖨️ COMPILED G-CODE SEQUENCE INSPECTOR</span>
+              <span className="close-x-btn" onClick={closeGCodeModal}>×</span>
             </div>
             <div className="cal-modal-body">
-                <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginBottom: '12px' }}>
-                    Reviewing auto-generated toolpath blocks for structural limit collisions before streaming to asset.
-                </div>
-                <pre id="cal-modal-gcode-view">{calibrationState.generatedGcode || "; No modules configured."}</pre>
-                <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
-                    <button className="secondary-btn" style={{ flex: 1 }} onClick={closeGCodeModal}>CLOSE INSPECTOR</button>
-                    <button className="action-btn" style={{ flex: 1 }} onClick={handleStartCalibration}>CONFIRM & RUN TEST</button>
-                </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginBottom: '12px' }}>
+                Reviewing auto-generated toolpath blocks for structural limit collisions before streaming to asset.
+              </div>
+              <pre id="cal-modal-gcode-view">{calibrationState.generatedGcode || "; No modules configured."}</pre>
+              <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
+                <button className="secondary-btn" style={{ flex: 1 }} onClick={closeGCodeModal}>CLOSE INSPECTOR</button>
+                <button className="action-btn" style={{ flex: 1 }} onClick={handleStartCalibration}>CONFIRM & RUN TEST</button>
+              </div>
             </div>
+          </div>
         </div>
-      </div>
-    )}
+      )}
     </>
   );
 }

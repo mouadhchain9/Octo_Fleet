@@ -34,11 +34,25 @@ class MaintenanceEngine {
   evaluatePrinter(printer, storeState) {
     // Only evaluate if the printer is actively printing
     if (!printer.isPrinting) return;
-    if (printer.status && ['PRINTDONE', 'PRINTCANCELLED', 'PAUSED'].includes(printer.status.state?.toUpperCase())) return;
+    
+    const isPaused = printer.status && ['PRINTDONE', 'PRINTCANCELLED', 'PAUSED'].includes(printer.status.state?.toUpperCase());
 
     if (!this.printerState[printer.id]) {
-      this.printerState[printer.id] = { heatedUp: false };
+      this.printerState[printer.id] = { heatedUp: false, lastPaused: isPaused, resumeTime: 0 };
     }
+    
+    const pState = this.printerState[printer.id];
+    
+    // Detect resume
+    if (pState.lastPaused && !isPaused) {
+      pState.resumeTime = Date.now();
+    }
+    pState.lastPaused = isPaused;
+
+    if (isPaused) return;
+
+    // Grace period of 15 seconds after resume to prevent immediate false alerts
+    if (Date.now() - pState.resumeTime < 15000) return;
 
     this.checkHeatCreep(printer, storeState);
     this.checkThermalUnderheating(printer, storeState);
@@ -127,6 +141,12 @@ class MaintenanceEngine {
     const history = printer.flowHistory;
     if (!history || history.length < 5) return;
 
+    // Wait until the printer has finished its pre-heating phase
+    if (!this.printerState[printer.id] || !this.printerState[printer.id].heatedUp) return;
+
+    // Wait until the printer is actually on the first layer (filters out pre-print bed leveling)
+    if (!printer.layer || printer.layer <= 0) return;
+
     const now = Date.now();
     // 30-second rolling window to handle long travel moves
     const windowSamples = history.filter(h => now - h.time <= 30000);
@@ -201,7 +221,7 @@ class MaintenanceEngine {
     console.warn(`[MaintenanceEngine] Executing autonomous ${action} on ${printerId}`);
     
     // Publish to OctoPrint if configured
-    if (printer.connectionConfig) {
+    if (printer.connectionConfig && printer.mode !== 'mock_replay') {
       const { ip, apiKey } = printer.connectionConfig;
       // Abort is not a standard OctoPrint API command without a plugin, 
       // but 'cancel' or 'pause' works depending on the severity
@@ -211,6 +231,23 @@ class MaintenanceEngine {
         console.log(`[MaintenanceEngine] Successfully sent ${octoCmd} to OctoPrint at ${ip}`);
       } else {
         console.error(`[MaintenanceEngine] Failed to send ${octoCmd} to OctoPrint at ${ip}:`, result.error);
+      }
+    } else if (printer.mode === 'mock_replay') {
+      try {
+        const { AppContext } = await import('../../app_context.js');
+        const printerObj = AppContext.farm.printers.find(p => p.id === printerId);
+        if (printerObj) {
+          if (action === 'pause') {
+            if (printerObj.dbReplay?.isRunning) printerObj.dbReplay.pause();
+            if (printerObj.mocker?.pause) printerObj.mocker.pause();
+          } else if (action === 'abort') {
+            if (printerObj.dbReplay?.isRunning) printerObj.dbReplay.stop();
+            if (printerObj.mocker?.stop) printerObj.mocker.stop();
+          }
+          console.log(`[MaintenanceEngine] Successfully triggered ${action} on mock engine for ${printerId}`);
+        }
+      } catch (err) {
+        console.error(`[MaintenanceEngine] Failed to trigger ${action} on mock engine:`, err);
       }
     }
 

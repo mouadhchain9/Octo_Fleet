@@ -66,7 +66,8 @@ export const useFleetStore = create(subscribeWithSelector((set) => ({
     assetWizard: false,
     globalAddMenu: false,
     statusOptions: false,
-    gcodeModal: false
+    gcodeModal: false,
+    setupGuide: false
   },
 
   paneStates: {
@@ -464,6 +465,19 @@ export const useFleetStore = create(subscribeWithSelector((set) => ({
         // Only react to meaningful transitions:
         if (incoming === 'PRINTING' && current !== 'PRINTING' && current !== 'PAUSED') {
           logEvent("Print Started", "current");
+          
+          // Flush data on new print start
+          existing.flowHistory = [];
+          existing.cumulativeFlowMm = 0;
+          
+          // Asynchronously clear the 3D filament renderer
+          import('../../app_context.js').then(({ AppContext }) => {
+            const p = AppContext?.farm?.printers?.find(p => p.id === id);
+            if (p && p.filament) {
+              p.filament.clear();
+            }
+          }).catch(console.error);
+          
         } else if (incoming === 'PAUSED' && current === 'PRINTING') {
           logEvent("Print Paused", "completed");
         } else if (incoming === 'PRINTING' && current === 'PAUSED') {
@@ -617,11 +631,11 @@ export const useFleetStore = create(subscribeWithSelector((set) => ({
     }
 
     if (flowPoint) {
-      // Accumulate positive counts only (ignore negative/noise)
-      if (flowPoint.counts > 0) {
+      // Accumulate all counts (absolute value) to track total filament movement (mileage)
+      if (flowPoint.counts !== 0) {
         // counts is raw encoder pulses; 1 count ≈ 0.0539 mm (encoder calibration)
         const MM_PER_COUNT = 0.0539;
-        cumulativeFlowMm = cumulativeFlowMm + (flowPoint.counts * MM_PER_COUNT);
+        cumulativeFlowMm = cumulativeFlowMm + (Math.abs(flowPoint.counts) * MM_PER_COUNT);
       }
       flowHistory.push({ ...flowPoint, cumulativeMm: cumulativeFlowMm });
       if (flowHistory.length > FLOW_MAX_SAMPLES) flowHistory.shift();
@@ -689,8 +703,8 @@ export const useFleetStore = create(subscribeWithSelector((set) => ({
 
       if (flowPoints.length > 0) {
         for (const fp of flowPoints) {
-          if (fp.counts > 0) {
-            cumulativeFlowMm = cumulativeFlowMm + (fp.counts * MM_PER_COUNT);
+          if (fp.counts !== 0) {
+            cumulativeFlowMm = cumulativeFlowMm + (Math.abs(fp.counts) * MM_PER_COUNT);
           }
           flowHistory.push({ ...fp, cumulativeMm: cumulativeFlowMm });
         }
