@@ -370,12 +370,23 @@ body {
     margin-right: 8px;
 }
 
-.status-dot.critical {
+.status-dot.critical,
+.status-dot.disconnected {
     color: var(--accent-red);
 }
 
-.status-dot.warning {
+.status-dot.warning,
+.status-dot.standalone {
     color: var(--accent-amber);
+}
+
+.status-dot.mock_replay {
+    color: var(--accent-blue);
+}
+
+.status-dot.stream,
+.status-dot.green {
+    color: var(--accent-green);
 }
 
 /* Alert type left-border severity indicators */
@@ -953,6 +964,12 @@ body {
     box-shadow: 0 0 10px var(--accent-red);
 }
 
+.status-blue::before {
+    background: var(--accent-blue);
+    box-shadow: 0 0 10px var(--accent-blue);
+    animation: pulse-blue 2s infinite;
+}
+
 @keyframes pulse-green {
     0% {
         box-shadow: 0 0 0px rgba(0, 255, 194, 0);
@@ -978,6 +995,20 @@ body {
 
     100% {
         box-shadow: 0 0 0px rgba(255, 184, 0, 0);
+    }
+}
+
+@keyframes pulse-blue {
+    0% {
+        box-shadow: 0 0 0px rgba(56, 189, 248, 0);
+    }
+
+    50% {
+        box-shadow: 0 0 12px rgba(56, 189, 248, 0.8);
+    }
+
+    100% {
+        box-shadow: 0 0 0px rgba(56, 189, 248, 0);
     }
 }
 
@@ -1044,19 +1075,28 @@ body {
     transition: all 0.3s ease;
 }
 
-.status-text.green {
+.status-text.green,
+.status-text.status-green {
     color: var(--accent-green);
     text-shadow: 0 0 8px rgba(0, 255, 194, 0.6);
 }
 
-.status-text.amber {
+.status-text.amber,
+.status-text.status-amber {
     color: var(--accent-amber);
     text-shadow: 0 0 8px rgba(255, 184, 0, 0.6);
 }
 
-.status-text.red {
+.status-text.red,
+.status-text.status-red {
     color: var(--accent-red);
     text-shadow: 0 0 8px rgba(255, 75, 75, 0.6);
+}
+
+.status-text.blue,
+.status-text.status-blue {
+    color: var(--accent-blue);
+    text-shadow: 0 0 8px rgba(56, 189, 248, 0.6);
 }
 
 /* Optional: Make the trigger pulse slightly when disconnected/warning */

@@ -740,7 +740,7 @@ export function FleetSidebar() {
                             onDoubleClick={() => handleAssetDoubleClick(asset.id)}
                           >
                             <span className="asset-label">
-                              <span className="status-dot green">●</span>
+                              <span className={`status-dot ${printers[asset.id]?.mode || 'disconnected'}`}>●</span>
                               {asset.name}
                             </span>
                             <div className="asset-actions" style={{ visibility: 'visible', opacity: 1 }}>
